@@ -1,0 +1,13 @@
+numpy
+pandas
+opencv-python
+matplotlib
+seaborn
+scikit-learn
+joblib
+shap
+
+# Optional — only needed for llm_engine.py / test_system.py's LLM report step.
+# Requires a local Ollama server running with the model pulled, e.g.:
+#   ollama pull llama3.2
+ollama

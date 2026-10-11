@@ -2,42 +2,33 @@
 UAV-XAI Localization Console
 =============================
 A mission-console style Streamlit dashboard for the UAV-Localization
-explainable-AI pipeline. It wraps your existing modules — dataset_loader,
-feature_extractor, semantic_extractor, depth_features, pose_analyser,
-reasoning_engine, and llm_engine — in a proper front end instead of
-console prints.
+pipeline. Mirrors test_system.py exactly (same feature extraction, same
+model, same SHAP ranking, same llm_engine.generate_report() call) and
+renders it as a UI instead of console prints.
 
-Place this file in the same directory as the rest of the repo
-(dataset_loader.py, feature_extractor.py, rf_localization.pkl, etc.)
-and run:
+Place this file in the repo root, next to config.py, dataset_loader.py,
+feature_extractor.py, semantic_extractor.py, depth_features.py,
+class_names.py, llm_engine.py, and rf_localization.pkl / feature_names.pkl.
 
+Run with:
     streamlit run app.py
 """
 
-import streamlit as st
-import pandas as pd
+import os
 import numpy as np
+import pandas as pd
 import joblib
 import shap
 import matplotlib.pyplot as plt
+import streamlit as st
 
 from dataset_loader import TartanAirDatasetLoader
 from feature_extractor import FeatureExtractor
 from semantic_extractor import SemanticExtractor
 from depth_features import DepthFeatureExtractor
-from pose_analyser import PoseAnalyzer
-
-try:
-    from reasoning_engine import explain
-    HAS_REASONING = True
-except Exception:
-    HAS_REASONING = False
-
-try:
-    from llm_engine import generate_report
-    HAS_LLM = True
-except Exception:
-    HAS_LLM = False
+from class_names import get_class_name
+import config
+from llm_engine import generate_report, compute_risk_level
 
 
 # ============================================================
@@ -51,7 +42,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# THEME / CSS  — flight-instrumentation palette
+# THEME / CSS — flight-instrumentation palette
 # ============================================================
 CYAN = "#4FD1C5"
 AMBER = "#F0A94E"
@@ -67,188 +58,138 @@ st.markdown(f"""
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap');
 
 html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; color: {TEXT}; }}
-
 .stApp {{ background: radial-gradient(circle at 12% 0%, #101A2A 0%, {BG} 55%); }}
-
-section[data-testid="stSidebar"] {{
-    background: {PANEL};
-    border-right: 1px solid {BORDER};
-}}
-
+section[data-testid="stSidebar"] {{ background: {PANEL}; border-right: 1px solid {BORDER}; }}
 h1, h2, h3 {{ font-family: 'Space Grotesk', sans-serif; letter-spacing: -0.01em; }}
 
 .console-header {{
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-end;
-    border-bottom: 1px solid {BORDER};
-    padding-bottom: 14px;
-    margin-bottom: 22px;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    border-bottom: 1px solid {BORDER}; padding-bottom: 14px; margin-bottom: 22px;
 }}
-.console-title {{
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 26px;
-    font-weight: 700;
-    margin: 0;
-}}
-.console-sub {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 12.5px;
-    color: {MUTED};
-    margin-top: 2px;
-    letter-spacing: 0.03em;
-}}
-.status-pill {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 11.5px;
-    padding: 5px 11px;
-    border-radius: 3px;
-    border: 1px solid {CYAN}55;
-    color: {CYAN};
-    background: {CYAN}14;
-}}
+.console-title {{ font-family: 'Space Grotesk', sans-serif; font-size: 26px; font-weight: 700; margin: 0; }}
+.console-sub {{ font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; color: {MUTED}; margin-top: 2px; letter-spacing: 0.03em; }}
+.status-pill {{ font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; padding: 5px 11px; border-radius: 3px; border: 1px solid {CYAN}55; color: {CYAN}; background: {CYAN}14; }}
 
-.metric-card {{
-    background: {PANEL};
-    border: 1px solid {BORDER};
-    border-left: 3px solid {CYAN};
-    border-radius: 4px;
-    padding: 14px 18px;
-    height: 100%;
-}}
-.metric-label {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 10.5px;
-    letter-spacing: 0.06em;
-    color: {MUTED};
-    text-transform: uppercase;
-    margin-bottom: 6px;
-}}
-.metric-value {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 28px;
-    font-weight: 600;
-    color: {TEXT};
-}}
+.metric-card {{ background: {PANEL}; border: 1px solid {BORDER}; border-left: 3px solid {CYAN}; border-radius: 4px; padding: 14px 18px; height: 100%; }}
+.metric-label {{ font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.06em; color: {MUTED}; text-transform: uppercase; margin-bottom: 6px; }}
+.metric-value {{ font-family: 'IBM Plex Mono', monospace; font-size: 26px; font-weight: 600; color: {TEXT}; }}
 .metric-unit {{ font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: {MUTED}; margin-left: 4px; }}
 
 .risk-low {{ color: {CYAN} !important; border-left-color: {CYAN} !important; }}
 .risk-medium {{ color: {AMBER} !important; border-left-color: {AMBER} !important; }}
 .risk-high {{ color: {RED} !important; border-left-color: {RED} !important; }}
 
-.panel {{
-    background: {PANEL};
-    border: 1px solid {BORDER};
-    border-radius: 4px;
-    padding: 20px 22px;
-}}
-.panel-title {{
-    font-family: 'Space Grotesk', sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-    color: {TEXT};
-    margin-bottom: 12px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}}
+.panel {{ background: {PANEL}; border: 1px solid {BORDER}; border-radius: 4px; padding: 20px 22px; }}
+.panel-title {{ font-family: 'Space Grotesk', sans-serif; font-size: 14px; font-weight: 600; color: {TEXT}; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }}
 .panel-title:before {{ content: ""; width: 6px; height: 6px; background: {CYAN}; display: inline-block; border-radius: 1px; }}
 
-.rec-item {{
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 13px;
-    color: {TEXT};
-    border-bottom: 1px dashed {BORDER};
-    padding: 9px 2px;
-}}
+.rec-item {{ font-family: 'IBM Plex Mono', monospace; font-size: 13px; color: {TEXT}; border-bottom: 1px dashed {BORDER}; padding: 9px 2px; }}
 .rec-item:last-child {{ border-bottom: none; }}
 
-.report-box {{ font-family: 'IBM Plex Mono', monospace; font-size: 13px; line-height: 1.6; color: {TEXT}; white-space: pre-wrap; }}
+.report-box {{ font-family: 'Inter', sans-serif; font-size: 14.5px; line-height: 1.7; color: {TEXT}; }}
+
+.caveat {{ font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: {MUTED}; line-height: 1.6; border-left: 2px solid {AMBER}; padding: 4px 0 4px 10px; margin-top: 4px; }}
 
 button[data-baseweb="tab"] {{ font-family: 'Space Grotesk', sans-serif; font-size: 13px; }}
-
-.stButton>button {{
-    background: {CYAN};
-    color: #06110F;
-    border: none;
-    font-family: 'IBM Plex Mono', monospace;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    border-radius: 3px;
-}}
+.stButton>button {{ background: {CYAN}; color: #06110F; border: none; font-family: 'IBM Plex Mono', monospace; font-weight: 600; letter-spacing: 0.02em; border-radius: 3px; }}
 .stButton>button:hover {{ background: #6EE0D6; color: #06110F; }}
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# CACHED PIPELINE LOADER
+# CACHED LOADERS
 # ============================================================
 @st.cache_resource(show_spinner=False)
-def load_pipeline(dataset_path: str):
-    dataset = TartanAirDatasetLoader(dataset_path)
-    return {
-        "dataset": dataset,
-        "feature_extractor": FeatureExtractor(),
-        "semantic_extractor": SemanticExtractor(),
-        "depth_extractor": DepthFeatureExtractor(),
-        "pose_analyzer": PoseAnalyzer(),
-        "model": joblib.load("rf_localization.pkl"),
-        "feature_names": joblib.load("feature_names.pkl"),
-        "explainer": shap.TreeExplainer(joblib.load("rf_localization.pkl")),
-    }
+def load_model():
+    model = joblib.load(config.MODEL_PATH)
+    feature_names = joblib.load(config.FEATURE_NAMES_PATH)
+    explainer = shap.TreeExplainer(model)
+    return model, feature_names, explainer
 
 
-CLASS_NAME_MAP = {
-    28: "Furniture", 229: "Shelf", 180: "Carpet", 157: "Wall",
-    199: "Door", 74: "Window", 87: "Ceiling", 64: "Floor",
-}
+@st.cache_resource(show_spinner=False)
+def get_extractors():
+    return FeatureExtractor(), SemanticExtractor(), DepthFeatureExtractor()
 
 
-def risk_from_error(err: float):
-    if err < 0.30:
-        return "LOW", "risk-low"
-    if err < 0.80:
-        return "MEDIUM", "risk-medium"
-    return "HIGH", "risk-high"
+@st.cache_resource(show_spinner=False)
+def load_dataset(dataset_root: str, sequence: str):
+    return TartanAirDatasetLoader(os.path.join(dataset_root, sequence))
 
 
-def run_inference(pipeline, frame: int, matches: int):
-    dataset = pipeline["dataset"]
+def to_displayable(img):
+    """Percentile-normalize any depth/segmentation array to a viewable uint8 image."""
+    arr = np.nan_to_num(np.asarray(img).astype(np.float64))
+    lo, hi = np.percentile(arr, [1, 99])
+    if hi <= lo:
+        hi = lo + 1.0
+    arr = np.clip((arr - lo) / (hi - lo), 0, 1)
+    return (arr * 255).astype(np.uint8)
+
+
+def risk_class(prediction: float) -> str:
+    if prediction < 0.30:
+        return "risk-low"
+    if prediction <= 0.80:
+        return "risk-medium"
+    return "risk-high"
+
+
+def run_inference(dataset, frame, model, feature_names, explainer, extractors):
+    """Mirrors test_system.py exactly: same feature dict, same dx/dy/dz
+    fallback, same column alignment, same SHAP ranking."""
+    feature_extractor, semantic_extractor, depth_extractor = extractors
     sample = dataset.get_sample(frame)
 
     features = {}
-    features.update(pipeline["feature_extractor"].extract(sample["rgb"]))
-    features.update(pipeline["semantic_extractor"].extract(sample["segmentation"]))
-    features.update(pipeline["depth_extractor"].extract(sample["depth"]))
+    features.update(feature_extractor.extract(sample["rgb"]))
+    features.update(semantic_extractor.extract(sample["segmentation"]))
+    features.update(depth_extractor.extract(sample["depth"]))
 
-    pose1 = sample["pose"]
-    pose2 = dataset.get_sample(frame + 1)["pose"]
-    features.update(pipeline["pose_analyzer"].motion_features(pose1, pose2))
-    features["matches"] = matches
+    try:
+        pose1 = dataset.poses[frame]
+        pose2 = dataset.poses[frame + 1]
+        features["dx"] = pose2[0] - pose1[0]
+        features["dy"] = pose2[1] - pose1[1]
+        features["dz"] = pose2[2] - pose1[2]
+    except Exception:
+        features["dx"] = 0
+        features["dy"] = 0
+        features["dz"] = 0
 
-    feature_names = pipeline["feature_names"]
-    row = pd.DataFrame([features])
+    df = pd.DataFrame([features])
     for col in feature_names:
-        if col not in row.columns:
-            row[col] = 0
-    row = row[feature_names]
+        if col not in df.columns:
+            df[col] = 0
+    df = df[feature_names]
 
-    prediction = pipeline["model"].predict(row)[0]
+    prediction = model.predict(df)[0]
 
-    values = pipeline["explainer"].shap_values(row)
-    if isinstance(values, list):
-        values = values[0]
-    shap_values = values[0]
-
+    shap_values = explainer.shap_values(df)
     importance = pd.DataFrame({
         "Feature": feature_names,
-        "Value": row.iloc[0].values,
-        "SHAP": shap_values,
-        "Importance": np.abs(shap_values),
-    }).sort_values("Importance", ascending=False)
+        "Value": df.iloc[0].values,
+        "SHAP": shap_values[0],
+    })
+    importance["ABS"] = importance["SHAP"].abs()
+    importance = importance.sort_values("ABS", ascending=False).reset_index(drop=True)
+    importance["Readable"] = importance["Feature"].apply(get_class_name)
 
     return sample, prediction, importance
+
+
+def parse_report(report_text: str):
+    """generate_report() always returns
+    'Risk Level: ...\\n\\nExplanation\\n...\\n\\nRecommendations\\n...' —
+    this split is deterministic (built in Python), so it's safe to parse."""
+    try:
+        risk_part, rest = report_text.split("\n\nExplanation\n", 1)
+        explanation, recommendations = rest.split("\n\nRecommendations\n", 1)
+        risk_level = risk_part.replace("Risk Level:", "").strip()
+        return risk_level, explanation.strip(), recommendations.strip()
+    except ValueError:
+        return None, report_text.strip(), ""
 
 
 # ============================================================
@@ -256,19 +197,37 @@ def run_inference(pipeline, frame: int, matches: int):
 # ============================================================
 with st.sidebar:
     st.markdown("### Mission Parameters")
-    dataset_path = st.text_input(
-        "Dataset path",
-        value=r"E:\7th sem\major project 01\TartanAir\ArchVizTinyHouseDay\Data_easy\P000",
-        help="Path to a TartanAir sequence folder (e.g. .../Data_easy/P000)",
+
+    dataset_root = st.text_input(
+        "Dataset root (UAV_DATASET_ROOT)",
+        value=config.DATASET_ROOT,
+        help="Folder containing per-sequence subfolders (P000, P001, ...).",
     )
-    frame = st.number_input("Frame index", min_value=0, value=20, step=1)
-    matches = st.number_input("ORB feature matches", min_value=0, value=1800, step=50)
-    top_n = st.slider("Top SHAP features to show", 3, 15, 5)
-    generate_llm = st.checkbox("Generate AI mission report (requires Ollama)", value=False)
+
+    default_seq_index = (
+        config.SEQUENCES.index(config.DEMO_SEQUENCE)
+        if config.DEMO_SEQUENCE in config.SEQUENCES else 0
+    )
+    sequence = st.selectbox("Sequence", config.SEQUENCES, index=default_seq_index)
+
+    frame = st.number_input("Frame index", min_value=0, value=config.DEMO_FRAME, step=1)
+    top_n = st.slider("Top SHAP factors", 3, 10, 5)
+    generate_llm = st.checkbox("Generate AI explanation (requires Ollama)", value=False)
+
     st.markdown("---")
     run = st.button("▶  RUN ANALYSIS", use_container_width=True)
     st.markdown("---")
-    st.caption("UAV-XAI · Explainable Localization Error Estimation · Random Forest + SHAP")
+
+    st.caption("Known caveats")
+    st.markdown(f"""
+    <div class="caveat">
+    orb_features dominates feature importance (~73%) — the label itself
+    is partly derived from ORB match count, so treat this as a limitation
+    of the current labeling approach, not a validated causal finding.<br><br>
+    Segmentation class names are unverified placeholders pending the
+    official TartanAir label legend for this scene.
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -293,17 +252,25 @@ if "result" not in st.session_state:
 
 if run:
     try:
-        with st.spinner("Loading pipeline and dataset..."):
-            pipeline = load_pipeline(dataset_path)
-        with st.spinner(f"Extracting features and running inference on frame {frame}..."):
-            sample, prediction, importance = run_inference(pipeline, frame, matches)
+        with st.spinner("Loading model and dataset..."):
+            model, feature_names, explainer = load_model()
+            dataset = load_dataset(dataset_root, sequence)
+            extractors = get_extractors()
+        with st.spinner(f"Extracting features and running inference on {sequence} / frame {frame}..."):
+            sample, prediction, importance = run_inference(
+                dataset, frame, model, feature_names, explainer, extractors
+            )
         st.session_state.result = {
             "sample": sample,
             "prediction": prediction,
             "importance": importance,
+            "sequence": sequence,
             "frame": frame,
         }
-        st.session_state.pop("recommendations", None)
+        st.session_state.pop("report", None)
+    except FileNotFoundError as e:
+        st.error(f"Dataset or model file not found: {e}")
+        st.session_state.result = None
     except Exception as e:
         st.error(f"Pipeline error: {e}")
         st.session_state.result = None
@@ -315,9 +282,9 @@ if result is None:
     <div class="panel">
         <p class="panel-title">Awaiting Run</p>
         <p style="color:{MUTED}; font-family:'IBM Plex Mono',monospace; font-size:13px;">
-        Set a dataset path and frame index in the sidebar, then press RUN ANALYSIS
-        to extract features, predict localization error, and generate a SHAP-based
-        explanation for the selected frame.
+        Set the dataset root, sequence, and frame index in the sidebar, then
+        press RUN ANALYSIS to extract features, predict localization error,
+        and rank the SHAP factors behind that prediction.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -326,39 +293,40 @@ if result is None:
 prediction = result["prediction"]
 importance = result["importance"]
 sample = result["sample"]
-risk_label, risk_class = risk_from_error(prediction)
+rclass = risk_class(prediction)
+risk_label = compute_risk_level(prediction)
 
 # ---- KPI row ----
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown(f"""
-    <div class="metric-card {risk_class}">
+    <div class="metric-card {rclass}">
         <div class="metric-label">Predicted Localization Error</div>
-        <div class="metric-value {risk_class}">{prediction:.3f}<span class="metric-unit">m</span></div>
+        <div class="metric-value {rclass}">{prediction:.3f}<span class="metric-unit">m</span></div>
     </div>""", unsafe_allow_html=True)
 with c2:
     st.markdown(f"""
-    <div class="metric-card {risk_class}">
+    <div class="metric-card {rclass}">
         <div class="metric-label">Risk Level</div>
-        <div class="metric-value {risk_class}">{risk_label}</div>
+        <div class="metric-value {rclass}" style="font-size:16px;">{risk_label}</div>
     </div>""", unsafe_allow_html=True)
 with c3:
+    st.markdown(f"""
+    <div class="metric-card">
+        <div class="metric-label">Sequence</div>
+        <div class="metric-value">{result['sequence']}</div>
+    </div>""", unsafe_allow_html=True)
+with c4:
     st.markdown(f"""
     <div class="metric-card">
         <div class="metric-label">Frame Index</div>
         <div class="metric-value">{result['frame']:04d}</div>
     </div>""", unsafe_allow_html=True)
-with c4:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">ORB Matches</div>
-        <div class="metric-value">{matches}</div>
-    </div>""", unsafe_allow_html=True)
 
 st.write("")
 
-tab_sensor, tab_xai, tab_report, tab_recs = st.tabs(
-    ["◧ Sensor Feed", "◨ Explainability", "◩ Mission Report", "◪ Recommendations"]
+tab_sensor, tab_xai, tab_report = st.tabs(
+    ["◧ Sensor Feed", "◨ Explainability", "◩ AI Explanation"]
 )
 
 # ---- Sensor Feed ----
@@ -369,10 +337,10 @@ with tab_sensor:
         st.image(sample["rgb"], use_container_width=True)
     with col2:
         st.markdown('<p class="panel-title">Depth</p>', unsafe_allow_html=True)
-        st.image(sample["depth"], use_container_width=True)
+        st.image(to_displayable(sample["depth"]), use_container_width=True)
     with col3:
         st.markdown('<p class="panel-title">Segmentation</p>', unsafe_allow_html=True)
-        st.image(sample["segmentation"], use_container_width=True)
+        st.image(to_displayable(sample["segmentation"]), use_container_width=True)
 
 # ---- Explainability ----
 with tab_xai:
@@ -382,7 +350,7 @@ with tab_xai:
     fig.patch.set_facecolor(BG)
     ax.set_facecolor(BG)
     colors = [CYAN if v >= 0 else RED for v in top["SHAP"]]
-    ax.barh(top["Feature"], top["SHAP"], color=colors, height=0.55)
+    ax.barh(top["Readable"], top["SHAP"], color=colors, height=0.55)
     ax.axvline(0, color=MUTED, linewidth=0.8)
     ax.tick_params(colors=TEXT, labelsize=9)
     for spine in ax.spines.values():
@@ -397,70 +365,46 @@ with tab_xai:
     with right:
         st.markdown('<p class="panel-title">Top Feature Table</p>', unsafe_allow_html=True)
         st.dataframe(
-            importance.head(top_n)[["Feature", "Value", "SHAP"]].style.format(
+            importance.head(top_n)[["Readable", "Feature", "Value", "SHAP"]].style.format(
                 {"Value": "{:.3f}", "SHAP": "{:+.3f}"}
             ),
             use_container_width=True,
             hide_index=True,
         )
 
-    st.markdown('<p class="panel-title">Plain-Language Observations</p>', unsafe_allow_html=True)
-    lines = []
-    for _, r in importance.head(top_n).iterrows():
-        f = r["Feature"]
-        if f.startswith("class_"):
-            cid = int(f.split("_")[1])
-            name = CLASS_NAME_MAP.get(cid, f"Class {cid}")
-            lines.append(f"Large presence of {name} in view influenced the localization estimate.")
-        elif f == "contrast":
-            lines.append("Low image contrast reduced reliable feature detection.")
-        elif f == "brightness":
-            lines.append("Illumination levels affected localization quality.")
-        elif f == "matches":
-            lines.append("Number of ORB feature matches affected pose estimation confidence.")
-        elif "depth" in f:
-            lines.append("Scene depth variation influenced the localization estimate.")
-        elif "orb" in f:
-            lines.append("ORB keypoint density affected pose estimation accuracy.")
-        else:
-            lines.append(f"'{f}' contributed to the localization estimate.")
-    st.markdown(
-        '<div class="panel">' + "".join(f'<div class="rec-item">• {l}</div>' for l in lines) + "</div>",
-        unsafe_allow_html=True,
-    )
-
-# ---- Mission Report ----
+# ---- AI Explanation ----
 with tab_report:
-    st.markdown('<p class="panel-title">AI-Generated Mission Report</p>', unsafe_allow_html=True)
-    if not (HAS_REASONING and HAS_LLM):
-        st.info("reasoning_engine.py and/or llm_engine.py were not importable — "
-                "make sure both are in the app directory to enable AI report generation.")
-    elif not generate_llm:
-        st.info("Enable 'Generate AI mission report' in the sidebar, then re-run analysis.")
-    else:
-        with st.spinner("Generating report via local LLM (Ollama)..."):
-            try:
-                facts, recommendations = explain(importance)
-                report_text = generate_report(prediction, facts, recommendations)
-                st.session_state["recommendations"] = recommendations
-                st.markdown(f'<div class="panel"><div class="report-box">{report_text}</div></div>',
-                            unsafe_allow_html=True)
-            except Exception as e:
-                st.error(f"Report generation failed (is Ollama running?): {e}")
+    st.markdown('<p class="panel-title">AI-Generated Explanation</p>', unsafe_allow_html=True)
 
-# ---- Recommendations ----
-with tab_recs:
-    st.markdown('<p class="panel-title">Operational Recommendations</p>', unsafe_allow_html=True)
-    recs = st.session_state.get("recommendations")
-    if not recs:
-        recs = [
-            "Reduce UAV speed",
-            "Increase illumination",
-            "Enable Visual-Inertial Localization",
-            "Avoid texture-poor regions",
-        ]
-        st.caption("Showing default recommendations — run the AI report for context-specific guidance.")
-    st.markdown(
-        '<div class="panel">' + "".join(f'<div class="rec-item">✓ {r}</div>' for r in recs) + "</div>",
-        unsafe_allow_html=True,
-    )
+    if not generate_llm:
+        st.info("Enable 'Generate AI explanation' in the sidebar, then re-run analysis.")
+    elif "report" in st.session_state:
+        risk_level, explanation, recommendations = st.session_state["report"]
+        st.markdown(f'<div class="panel"><div class="report-box">{explanation}</div></div>',
+                    unsafe_allow_html=True)
+        st.markdown('<p class="panel-title" style="margin-top:18px;">Recommendations</p>', unsafe_allow_html=True)
+        rec_lines = [l.strip() for l in recommendations.splitlines() if l.strip()]
+        st.markdown(
+            '<div class="panel">' + "".join(f'<div class="rec-item">✓ {l}</div>' for l in rec_lines) + "</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        with st.spinner("Generating explanation via local LLM (Ollama)..."):
+            try:
+                top = importance.head(top_n)
+                top_features_for_llm = [
+                    {
+                        "name": row["Readable"],
+                        "value": float(row["Value"]),
+                        "shap": float(row["SHAP"]),
+                        "raw_name": row["Feature"],
+                    }
+                    for _, row in top.iterrows()
+                ]
+                report_text = generate_report(prediction, top_features_for_llm)
+                st.session_state["report"] = parse_report(report_text)
+                st.rerun()
+            except RuntimeError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Report generation failed: {e}")
